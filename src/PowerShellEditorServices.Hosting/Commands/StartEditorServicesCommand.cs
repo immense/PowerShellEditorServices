@@ -241,7 +241,7 @@ namespace Microsoft.PowerShell.EditorServices.Commands
                 _logger.LogException("Exception encountered starting EditorServices", e);
 
                 // Give the user a chance to read the message if they have a console
-                if (!Stdio)
+                if (!Stdio && !Console.IsInputRedirected)
                 {
                     Host.UI.WriteLine("\n== Press any key to close terminal ==");
                     Console.ReadKey();
