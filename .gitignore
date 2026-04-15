@@ -9,6 +9,7 @@ tmp/
 App_Data
 *.user
 *.sln.cache
+*.csproj.lscache
 *.suo
 TestResults
 test/emacs-session.json
