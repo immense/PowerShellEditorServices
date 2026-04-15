@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup>
+    <PSESBundledModulePath Condition="'$(PSESBundledModulePath)' == ''">PSESBundledModules</PSESBundledModulePath>
+  </PropertyGroup>
+</Project>

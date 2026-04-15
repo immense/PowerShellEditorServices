@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.Build.NoTargets/3.7.134">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>Microsoft.PowerShell.EditorServices.Host</PackageId>
+    <Description>Private Immense package containing the PowerShell Editor Services host binaries and bundled module assets used by immybot.</Description>
+    <Authors>Immense Networks</Authors>
+    <RepositoryUrl>https://github.com/Immense/PowerShellEditorServices</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <PSESPackageSourceRoot Condition="'$(PSESPackageSourceRoot)' == ''">$(MSBuildThisFileDirectory)..\..\module\PowerShellEditorServices\</PSESPackageSourceRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="build\Microsoft.PowerShell.EditorServices.Host.props" Pack="true" PackagePath="build\Microsoft.PowerShell.EditorServices.Host.props" />
+    <None Include="build\Microsoft.PowerShell.EditorServices.Host.targets" Pack="true" PackagePath="build\Microsoft.PowerShell.EditorServices.Host.targets" />
+    <None Include="$(PSESPackageSourceRoot)**\*" Pack="true" PackagePath="PowerShellEditorServices\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Target Name="ValidatePsesPackageSourceRoot" BeforeTargets="Pack">
+    <Error
+      Condition="!Exists('$(PSESPackageSourceRoot)PowerShellEditorServices.psd1')"
+      Text="Expected built PowerShell Editor Services module output at '$(PSESPackageSourceRoot)'. Run `Invoke-Build -File ./PowerShellEditorServices.build.ps1 -Configuration Release Build,LayoutModule` first or override PSESPackageSourceRoot." />
+  </Target>
+</Project>

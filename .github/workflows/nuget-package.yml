@@ -1,0 +1,77 @@
+name: Pack and publish NuGet package
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'nuget/v*'
+    paths:
+      - 'packaging/Microsoft.PowerShell.EditorServices.Host.Package/**'
+      - 'module/PowerShellEditorServices/**'
+      - 'src/PowerShellEditorServices/**'
+      - 'src/PowerShellEditorServices.Hosting/**'
+      - 'PowerShellEditorServices.Common.props'
+      - 'PowerShellEditorServices.build.ps1'
+      - 'tools/installPSResources.ps1'
+      - '.github/workflows/nuget-package.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: false
+  NUGET_SOURCE: https://nuget.pkg.github.com/immense/index.json
+  PACKAGE_PROJECT: packaging/Microsoft.PowerShell.EditorServices.Host.Package/Microsoft.PowerShell.EditorServices.Host.Package.csproj
+
+jobs:
+  pack-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Remove official-only NuGet config
+        run: rm -f NuGet.Config
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Install PowerShell resources
+        shell: pwsh
+        run: ./tools/installPSResources.ps1
+
+      - name: Determine package version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$xml = Get-Content PowerShellEditorServices.Common.props
+          $sourceVersion = $xml.Project.PropertyGroup.VersionPrefix
+          if ("${{ github.ref }}" -like 'refs/tags/nuget/v*') {
+            $packageVersion = "${{ github.ref_name }}".Substring(7)
+          }
+          else {
+            $packageVersion = "$sourceVersion-preview.${{ github.run_number }}"
+          }
+          "packageVersion=$packageVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Build bundled module layout
+        shell: pwsh
+        run: Invoke-Build -File ./PowerShellEditorServices.build.ps1 -Configuration Release Build,LayoutModule
+
+      - name: Pack package
+        run: dotnet pack ${{ env.PACKAGE_PROJECT }} -c Release -p:PackageVersion=${{ steps.version.outputs.packageVersion }} -o ./nupkgs
+
+      - name: Push to GitHub Packages
+        run: dotnet nuget push ./nupkgs/*.nupkg --source ${{ env.NUGET_SOURCE }} --api-key ${{ github.token }} --skip-duplicate

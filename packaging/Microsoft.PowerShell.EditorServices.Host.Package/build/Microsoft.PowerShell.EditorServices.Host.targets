@@ -1,0 +1,32 @@
+<Project>
+  <PropertyGroup>
+    <_PSESImportedModuleRoot Condition="Exists('$(MSBuildThisFileDirectory)..\PowerShellEditorServices\PowerShellEditorServices.psd1')">$([MSBuild]::EnsureTrailingSlash('$(MSBuildThisFileDirectory)..\PowerShellEditorServices'))</_PSESImportedModuleRoot>
+    <_PSESImportedModuleRoot Condition="'$(_PSESImportedModuleRoot)' == '' and Exists('$(MSBuildThisFileDirectory)..\..\..\module\PowerShellEditorServices\PowerShellEditorServices.psd1')">$([MSBuild]::EnsureTrailingSlash('$(MSBuildThisFileDirectory)..\..\..\module\PowerShellEditorServices'))</_PSESImportedModuleRoot>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_PSESImportedModuleRoot)' != ''">
+    <Reference Include="Microsoft.PowerShell.EditorServices" Condition="Exists('$(_PSESImportedModuleRoot)bin\Common\Microsoft.PowerShell.EditorServices.dll')">
+      <HintPath>$(_PSESImportedModuleRoot)bin\Common\Microsoft.PowerShell.EditorServices.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.PowerShell.EditorServices.Hosting" Condition="Exists('$(_PSESImportedModuleRoot)bin\Core\Microsoft.PowerShell.EditorServices.Hosting.dll')">
+      <HintPath>$(_PSESImportedModuleRoot)bin\Core\Microsoft.PowerShell.EditorServices.Hosting.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Content Include="$(_PSESImportedModuleRoot)**\*"
+      TargetPath="$(PSESBundledModulePath)\PowerShellEditorServices\%(RecursiveDir)%(Filename)%(Extension)"
+      CopyToOutputDirectory="PreserveNewest"
+      CopyToPublishDirectory="PreserveNewest" />
+
+    <Content Include="$(_PSESImportedModuleRoot)bin\Common\*.dll"
+      TargetPath="%(Filename)%(Extension)"
+      CopyToOutputDirectory="PreserveNewest"
+      CopyToPublishDirectory="PreserveNewest" />
+
+    <Content Include="$(_PSESImportedModuleRoot)bin\Core\*.dll"
+      TargetPath="%(Filename)%(Extension)"
+      CopyToOutputDirectory="PreserveNewest"
+      CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
