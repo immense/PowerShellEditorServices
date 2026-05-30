@@ -315,7 +315,7 @@ namespace Microsoft.PowerShell.EditorServices.Services
         public string GetRelativePath(ScriptFile scriptFile)
         {
             Uri fileUri = scriptFile.DocumentUri.ToUri();
-            if (!scriptFile.IsUntitled)
+            if (!scriptFile.IsInMemory)
             {
                 // Support calculating out-of-workspace relative paths in the common case of a
                 // single workspace folder. Otherwise try to get the matching folder.
@@ -609,6 +609,57 @@ namespace Microsoft.PowerShell.EditorServices.Services
             string normalizedPath = parts[1].Replace('\\', '/');
             string encodedPath = string.Join("/", normalizedPath.Split('/').Select(Uri.EscapeDataString));
             return $"{s_psPathScheme}://{Uri.EscapeDataString(provider)}/{encodedPath}";
+        }
+
+        internal string ResolveWorkspacePath(string path) => ResolveRelativeScriptPath(InitialWorkingDirectory, path);
+
+        internal string ResolveRelativeScriptPath(string baseFilePath, string relativePath)
+        {
+            // TODO: Sometimes the `baseFilePath` (even when its `WorkspacePath`) is null.
+            string combinedPath = null;
+            Exception resolveException = null;
+
+            try
+            {
+                // If the path is already absolute there's no need to resolve it relatively
+                // to the baseFilePath.
+                if (Path.IsPathRooted(relativePath))
+                {
+                    return relativePath;
+                }
+
+                // Get the directory of the original script file, combine it
+                // with the given path and then resolve the absolute file path.
+                combinedPath =
+                    Path.GetFullPath(
+                        Path.Combine(
+                            baseFilePath,
+                            relativePath));
+            }
+            catch (NotSupportedException e)
+            {
+                // Occurs if the path is incorrectly formatted for any reason.  One
+                // instance where this occurred is when a user had curly double-quote
+                // characters in their source instead of normal double-quotes.
+                resolveException = e;
+            }
+            catch (ArgumentException e)
+            {
+                // Occurs if the path contains invalid characters, specifically those
+                // listed in System.IO.Path.InvalidPathChars.
+                resolveException = e;
+            }
+
+            if (resolveException != null)
+            {
+                logger.LogError(
+                    "Could not resolve relative script path\r\n" +
+                    $"    baseFilePath = {baseFilePath}\r\n    " +
+                    $"    relativePath = {relativePath}\r\n\r\n" +
+                    $"{resolveException}");
+            }
+
+            return combinedPath;
         }
 
         /// <summary>
