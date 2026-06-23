@@ -57,6 +57,11 @@ namespace Microsoft.PowerShell.EditorServices.Services
 
         private const string s_psPathScheme = "pspath";
 
+        // The host component of pspath:// URIs for items from the ScriptPSProvider drive.
+        // PowerShell's PSPath uses the drive name (pspath:) but we need the provider name
+        // as the URI host to round-trip correctly through GetPowerShellPath.
+        private const string s_psPathProviderHost = "ScriptPSProvider";
+
         private readonly ILogger logger;
         private readonly Version powerShellVersion;
         private readonly ConcurrentDictionary<string, ScriptFile> workspaceFiles = new();
@@ -597,8 +602,21 @@ namespace Microsoft.PowerShell.EditorServices.Services
         // Example:
         //   FileSystem::C:\\repo\\a.ps1 -> pspath://FileSystem/C%3A/repo/a.ps1
         //   Registry::HKEY_CURRENT_USER\\Software\\Foo -> pspath://Registry/HKEY_CURRENT_USER/Software/Foo
+        //   pspath:\local\Function\MyScript.ps1 -> pspath://ScriptPSProvider/local/Function/MyScript.ps1
         private static string CreatePowerShellPathUri(string psPath)
         {
+            // Handle drive-qualified paths from the pspath: provider drive, e.g.
+            //   pspath:\local\Function\MyScript.ps1
+            // PowerShell sets PSPath to the drive-qualified path (not provider-qualified),
+            // so we need to reconstruct the provider-qualified URI form.
+            if (psPath.StartsWith($"{s_psPathScheme}:", StringComparison.OrdinalIgnoreCase))
+            {
+                int colonIndex = psPath.IndexOf(':');
+                string drivePath = psPath.Substring(colonIndex + 1).Replace('\\', '/').TrimStart('/');
+                string driveEncodedPath = string.Join("/", drivePath.Split('/').Select(Uri.EscapeDataString));
+                return $"{s_psPathScheme}://{s_psPathProviderHost}/{driveEncodedPath}";
+            }
+
             string[] parts = psPath.Split(new[] { "::" }, 2, StringSplitOptions.None);
             if (parts.Length != 2)
             {
