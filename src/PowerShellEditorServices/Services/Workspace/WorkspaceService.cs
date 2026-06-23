@@ -414,19 +414,31 @@ namespace Microsoft.PowerShell.EditorServices.Services
 
             if (psesInternalHost is not null && powerShellWorkspacePaths.Length > 0)
             {
+                // Determine if all workspace paths are FileSystem provider paths.
+                // Non-FileSystem providers (e.g. pspath:) don't support Include/Exclude/Depth/FollowSymlink
+                // dynamic parameters, so we only add them for FileSystem paths.
+                bool allFileSystem = powerShellWorkspacePaths.All(
+                    p => p.StartsWith("Microsoft.PowerShell.FileSystem", StringComparison.OrdinalIgnoreCase)
+                         || !p.Contains("::"));
+
                 PSCommand psCommand = new PSCommand()
                     .AddCommand(@"Microsoft.PowerShell.Management\Get-ChildItem")
                         .AddParameter("LiteralPath", powerShellWorkspacePaths)
                         .AddParameter("Recurse")
                         .AddParameter("ErrorAction", ActionPreference.SilentlyContinue)
-                        .AddParameter("Force")
+                        .AddParameter("Force");
+
+                if (allFileSystem)
+                {
+                    psCommand
                         .AddParameter("Include", includeGlobs.Concat(VersionUtils.IsNetCore ? s_psFileExtensionsCoreFramework : s_psFileExtensionsFullFramework).ToArray())
                         .AddParameter("Exclude", excludeGlobs)
                         .AddParameter("Depth", maxDepth);
 
-                if (VersionUtils.IsNetCore)
-                {
-                    psCommand.AddParameter("FollowSymlink", !ignoreReparsePoints);
+                    if (VersionUtils.IsNetCore)
+                    {
+                        psCommand.AddParameter("FollowSymlink", !ignoreReparsePoints);
+                    }
                 }
 
                 psCommand
@@ -603,20 +615,35 @@ namespace Microsoft.PowerShell.EditorServices.Services
         //   FileSystem::C:\\repo\\a.ps1 -> pspath://FileSystem/C%3A/repo/a.ps1
         //   Registry::HKEY_CURRENT_USER\\Software\\Foo -> pspath://Registry/HKEY_CURRENT_USER/Software/Foo
         //   pspath:\local\Function\MyScript.ps1 -> pspath://ScriptPSProvider/local/Function/MyScript.ps1
+        //   ScriptPSProvider::pspath:\local\Function\MyScript.ps1 -> pspath://ScriptPSProvider/local/Function/MyScript.ps1
         private static string CreatePowerShellPathUri(string psPath)
         {
+            // Strip the provider qualifier prefix if present (e.g. "ScriptPSProvider::pspath:\..." -> "pspath:\...")
+            string pathPart = psPath;
+            if (pathPart.Contains("::"))
+            {
+                string[] qualifiedParts = pathPart.Split(new[] { "::" }, 2, StringSplitOptions.None);
+                if (qualifiedParts.Length == 2)
+                {
+                    pathPart = qualifiedParts[1];
+                }
+            }
+
             // Handle drive-qualified paths from the pspath: provider drive, e.g.
             //   pspath:\local\Function\MyScript.ps1
-            // PowerShell sets PSPath to the drive-qualified path (not provider-qualified),
-            // so we need to reconstruct the provider-qualified URI form.
-            if (psPath.StartsWith($"{s_psPathScheme}:", StringComparison.OrdinalIgnoreCase))
+            // PowerShell sets PSPath to the drive-qualified path (potentially provider-qualified
+            // as "ScriptPSProvider::pspath:\..."), so we strip the provider prefix above and
+            // then reconstruct the provider-qualified URI form.
+            if (pathPart.StartsWith($"{s_psPathScheme}:", StringComparison.OrdinalIgnoreCase))
             {
-                int colonIndex = psPath.IndexOf(':');
-                string drivePath = psPath.Substring(colonIndex + 1).Replace('\\', '/').TrimStart('/');
+                int colonIndex = pathPart.IndexOf(':');
+                string drivePath = pathPart.Substring(colonIndex + 1).Replace('\\', '/').TrimStart('/');
                 string driveEncodedPath = string.Join("/", drivePath.Split('/').Select(Uri.EscapeDataString));
                 return $"{s_psPathScheme}://{s_psPathProviderHost}/{driveEncodedPath}";
             }
 
+            // For other provider-qualified paths (e.g. FileSystem::C:\repo\a.ps1),
+            // use the original psPath which still has the "::" separator.
             string[] parts = psPath.Split(new[] { "::" }, 2, StringSplitOptions.None);
             if (parts.Length != 2)
             {
