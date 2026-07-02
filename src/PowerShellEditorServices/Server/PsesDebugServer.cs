@@ -51,8 +51,10 @@ namespace Microsoft.PowerShell.EditorServices.Server
         /// <returns>A task that completes when the server is ready.</returns>
         public async Task StartAsync()
         {
+            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] PsesDebugServer.StartAsync entered\n");
             _debugAdapterServer = await DebugAdapterServer.From(options =>
             {
+                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] DebugAdapterServer.From callback\n");
                 // We need to let the PowerShell Context Service know that we are in a debug session
                 // so that it doesn't send the powerShell/startDebugger message.
                 _psesHost = ServiceProvider.GetService<PsesInternalHost>();

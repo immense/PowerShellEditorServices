@@ -49,6 +49,7 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
 
         public async Task<SetBreakpointsResponse> Handle(SetBreakpointsArguments request, CancellationToken cancellationToken)
         {
+            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers.Handle called, path='{request.Source.Path}'\n");
             if (!_workspaceService.TryGetFile(request.Source.Path, out ScriptFile scriptFile))
             {
                 string message = _debugStateService.NoDebug ? string.Empty : "Source file could not be accessed, breakpoint not set.";
@@ -83,30 +84,62 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
             }
 
             // At this point, the source file has been verified as a PowerShell script.
+            // Use the DocumentUri (which matches what LaunchScriptAsync passes to
+            // Parser.ParseInput) so line breakpoints match the script block's Extent.File.
+            // Normalize file:///scripts/... URIs to pspath:// URIs so the debugger's
+            // functionContext._file matches the breakpoint's Script property.
+            string breakpointScriptPath = NormalizeScriptUri(scriptFile.DocumentUri.ToString());
             IReadOnlyList<BreakpointDetails> breakpointDetails = request.Breakpoints
                 .Select((srcBreakpoint) => BreakpointDetails.Create(
-                    scriptFile.FilePath,
+                    breakpointScriptPath,
                     srcBreakpoint.Line,
                     srcBreakpoint.Column,
                     srcBreakpoint.Condition,
                     srcBreakpoint.HitCondition,
                     srcBreakpoint.LogMessage)).ToList();
 
+            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: FilePath='{scriptFile.FilePath}', DocumentUri='{scriptFile.DocumentUri}', breakpointScriptPath='{breakpointScriptPath}', #breakpoints={breakpointDetails.Count}, line={breakpointDetails[0].LineNumber}\n");
+
             // If this is a "run without debugging (Ctrl+F5)" session ignore requests to set breakpoints.
             IReadOnlyList<BreakpointDetails> updatedBreakpointDetails = breakpointDetails;
+            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: NoDebug={_debugStateService.NoDebug}\n");
             if (!_debugStateService.NoDebug)
             {
+                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: calling WaitForSetBreakpointHandleAsync\n");
                 await _debugStateService.WaitForSetBreakpointHandleAsync().ConfigureAwait(false);
+                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: calling SetLineBreakpointsAsync\n");
 
                 try
                 {
+                    // The debugger's DebugMode may be Default or RemoteScript, neither of
+                    // which support SetLineBreakpoint. Use reflection to set it to Local so
+                    // breakpoints can be registered before the script launches.
+                    var debugger = _runspaceContext.CurrentRunspace.Runspace.Debugger;
+                    var debugModeProp = typeof(System.Management.Automation.Debugger).GetProperty("DebugMode");
+                    var currentMode = (System.Management.Automation.DebugModes)debugModeProp!.GetValue(debugger)!;
+                    if ((currentMode & System.Management.Automation.DebugModes.LocalScript) == 0)
+                    {
+                        debugModeProp.SetValue(debugger, currentMode | System.Management.Automation.DebugModes.LocalScript);
+                        System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: added LocalScript to DebugMode (was {currentMode})\n");
+                    }
+
                     updatedBreakpointDetails =
                         await _debugService.SetLineBreakpointsAsync(
                             scriptFile,
                             breakpointDetails).ConfigureAwait(false);
+                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: SetLineBreakpointsAsync returned {updatedBreakpointDetails.Count} breakpoints, verified={updatedBreakpointDetails.FirstOrDefault()?.Verified}\n");
+
+                    // Re-call SetDebugMode after breakpoints are registered. The debugger's
+                    // SetDebugMode internally checks if _idToBreakpoint is non-empty and sets
+                    // _context._debuggingMode to Enabled. If SetDebugMode was called before
+                    // breakpoints were added, _debuggingMode stays 0 and breakpoints are never
+                    // checked during execution.
+                    debugger.SetDebugMode(System.Management.Automation.DebugModes.LocalScript | System.Management.Automation.DebugModes.RemoteScript);
+                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: re-called SetDebugMode after breakpoint registration\n");
                 }
                 catch (Exception e)
                 {
+                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: EXCEPTION: {e}\n");
                     // Log whatever the error is
                     _logger.LogException($"Caught error while setting breakpoints in SetBreakpoints handler for file {scriptFile?.FilePath}", e);
                 }
@@ -197,6 +230,37 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
 
             string fileExtension = Path.GetExtension(resolvedScriptFile.FilePath);
             return s_supportedDebugFileExtensions.Contains(fileExtension, StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Normalizes file:///scripts/... URIs to pspath:// URIs so that the debugger's
+        /// functionContext._file (set from the ScriptBlock's Extent.File) matches the
+        /// breakpoint's Script property. PowerShell's debugger uses _file to look up
+        /// pending breakpoints, and file:/// URIs get resolved to empty strings in the
+        /// function context, while pspath:// URIs are preserved.
+        /// </summary>
+        internal static string NormalizeScriptUri(string uri)
+        {
+            if (string.IsNullOrEmpty(uri) || !uri.StartsWith("file:///scripts/"))
+                return uri;
+
+            var parts = uri.Replace("file:///scripts/", "").Split('/');
+            if (parts.Length < 3)
+                return uri;
+
+            var scope = parts[0].ToLowerInvariant();
+            var categoryPlural = parts[1];
+            var fileName = string.Join("/", parts.Skip(2));
+
+            var category = categoryPlural switch
+            {
+                "Functions" => "Function",
+                "Immy%20System" => "ImmySystem",
+                "Inventory" => "DeviceInventory",
+                _ => categoryPlural,
+            };
+
+            return $"pspath://ScriptPSProvider/{scope}/{category}/{fileName}";
         }
     }
 }

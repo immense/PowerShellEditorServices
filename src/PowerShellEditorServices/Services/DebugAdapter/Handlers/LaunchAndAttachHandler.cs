@@ -124,6 +124,7 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
 
         public async Task<LaunchResponse> Handle(PsesLaunchRequestArguments request, CancellationToken cancellationToken)
         {
+            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] LaunchAndAttachHandler.Handle called, Script='{request.Script}'\n");
             // The debugger has officially started. We use this to later check if we should stop it.
             ((PsesInternalHost)_executionService).DebugContext.IsActive = true;
 

@@ -66,6 +66,7 @@ namespace Microsoft.PowerShell.EditorServices.Services
 
         private void OnDebuggerStopped(object sender, DebuggerStoppedEventArgs e)
         {
+            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] OnDebuggerStopped: reason={e.OriginalEvent.Breakpoints.Count} breakpoints\n");
             // Provide the reason for why the debugger has stopped script execution.
             // See https://github.com/Microsoft/vscode/issues/3648
             // The reason is displayed in the breakpoints viewlet.  Some recommended reasons are:
