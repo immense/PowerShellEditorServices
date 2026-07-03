@@ -756,10 +756,11 @@ namespace Microsoft.PowerShell.EditorServices.Services
                 return false;
             }
 
-            // Filter Global-Scoped variables. We first cast to VariableDetails to ensure the prefix
-            // is added for purposes of comparison.
-            VariableDetails variableToAddDetails = new(variableToAdd);
-            if (globalScopeVariables.Children.ContainsKey(variableToAddDetails.Name))
+            // Filter well-known PowerShell built-in/preference variables to reduce noise.
+            // We used to filter everything in the global scope, but that also filtered
+            // user-defined variables that ended up in the global scope (e.g. from
+            // dot-sourced scripts). Instead, we now only filter known noise variables.
+            if (s_builtInVariableNames.Contains(variableToAdd.Name))
             {
                 return false;
             }
@@ -769,16 +770,36 @@ namespace Microsoft.PowerShell.EditorServices.Services
             {
                 return variableToAdd.Name switch
                 {
-                    "PSItem" or "_" or "" => true,
+                    // Skip empty/nothing variables
+                    null or "" or "_" => false,
+                    // Only show args/input if they have content
                     "args" or "input" => variableToAdd.Value is Array array && array.Length > 0,
                     "PSBoundParameters" => variableToAdd.Value is IDictionary dict && dict.Count > 0,
-                    _ => false
+                    // Show all other local variables (e.g. $a, $result, $computer)
+                    _ => true
                 };
             }
 
             // Any other PSVariables that survive the above criteria should be included.
             return variableInfo.Types[0].EndsWith("PSVariable");
         }
+
+        private static readonly HashSet<string> s_builtInVariableNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "ConfirmPreference", "DebugPreference", "Error", "ErrorActionPreference", "ErrorView",
+            "ExecutionContext", "FormatEnumerationLimit", "HOME", "Host", "InformationPreference",
+            "input", "MaximumHistoryCount", "MyInvocation", "NestedPromptLevel", "OutputEncoding",
+            "PID", "PROFILE", "ProgressPreference", "PSBoundParameters", "PSCommandPath",
+            "PSCulture", "PSDebugContext", "PSDefaultParameterValues", "PSEmailServer",
+            "PSHome", "PSItem", "PSLogUserProfile", "PSModuleAutoLoadingPreference",
+            "PSModulePath", "PSNativeCommandArgumentPassing", "PSNativeCommandUseErrorActionPreference",
+            "PSScriptRoot", "PSSessionConfigurationName", "PSSessionOption", "PSStyle",
+            "PSUICulture", "PSVersionTable", "PWD", "ShellId", "StackTrace",
+            "VerbosePreference", "WarningPreference", "WhatIfPreference", "^", "$",
+            "?", "true", "false", "null", "args", "PSCommand", "PSPath",
+            "ForEach", "Where", "psEditor", "ImmyBotVersion", "ImmyScriptPath",
+            "CanAccessParentTenant", "__psEditorServices_CallStack",
+        };
 
         private async Task FetchStackFramesAsync(string scriptNameOverride)
         {

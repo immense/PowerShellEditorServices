@@ -83,12 +83,9 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                 };
             }
 
-            // At this point, the source file has been verified as a PowerShell script.
-            // Use the DocumentUri (which matches what LaunchScriptAsync passes to
-            // Parser.ParseInput) so line breakpoints match the script block's Extent.File.
-            // Normalize file:///scripts/... URIs to pspath:// URIs so the debugger's
-            // functionContext._file matches the breakpoint's Script property.
-            string breakpointScriptPath = NormalizeScriptUri(scriptFile.DocumentUri.ToString());
+            // Use the DocumentUri directly — the frontend now uses pspath:// URIs everywhere,
+            // so no normalization is needed.
+            string breakpointScriptPath = scriptFile.DocumentUri.ToString();
             IReadOnlyList<BreakpointDetails> breakpointDetails = request.Breakpoints
                 .Select((srcBreakpoint) => BreakpointDetails.Create(
                     breakpointScriptPath,
@@ -230,37 +227,6 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
 
             string fileExtension = Path.GetExtension(resolvedScriptFile.FilePath);
             return s_supportedDebugFileExtensions.Contains(fileExtension, StringComparer.OrdinalIgnoreCase);
-        }
-
-        /// <summary>
-        /// Normalizes file:///scripts/... URIs to pspath:// URIs so that the debugger's
-        /// functionContext._file (set from the ScriptBlock's Extent.File) matches the
-        /// breakpoint's Script property. PowerShell's debugger uses _file to look up
-        /// pending breakpoints, and file:/// URIs get resolved to empty strings in the
-        /// function context, while pspath:// URIs are preserved.
-        /// </summary>
-        internal static string NormalizeScriptUri(string uri)
-        {
-            if (string.IsNullOrEmpty(uri) || !uri.StartsWith("file:///scripts/"))
-                return uri;
-
-            var parts = uri.Replace("file:///scripts/", "").Split('/');
-            if (parts.Length < 3)
-                return uri;
-
-            var scope = parts[0].ToLowerInvariant();
-            var categoryPlural = parts[1];
-            var fileName = string.Join("/", parts.Skip(2));
-
-            var category = categoryPlural switch
-            {
-                "Functions" => "Function",
-                "Immy%20System" => "ImmySystem",
-                "Inventory" => "DeviceInventory",
-                _ => categoryPlural,
-            };
-
-            return $"pspath://ScriptPSProvider/{scope}/{category}/{fileName}";
         }
     }
 }

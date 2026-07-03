@@ -127,37 +127,18 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                 }
                 if (isScriptFile && BreakpointApiUtils.SupportsBreakpointApis(_runspaceContext.CurrentRunspace))
                 {
-                    // Write the script content to a temp file so the debugger can properly
-                    // resolve breakpoints. When a ScriptBlock is dot-sourced, functionContext._file
-                    // may not be set (depending on the runspace configuration), preventing pending
-                    // breakpoint resolution. Writing to a temp file ensures _file is set to a real
-                    // path that the debugger can match against breakpoints.
-                    string tempScriptPath = System.IO.Path.Combine(
-                        System.IO.Path.GetTempPath(),
-                        $"pses_debug_{System.Guid.NewGuid():N}.ps1");
-                    System.IO.File.WriteAllText(tempScriptPath, untitledScript.Contents);
+                    // Use the DocumentUri directly — the frontend now uses pspath:// URIs everywhere.
+                    string scriptUri = untitledScript.DocumentUri.ToString();
 
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] LaunchScriptAsync: wrote temp script to '{tempScriptPath}'\n");
+                    ScriptBlockAst ast = Parser.ParseInput(
+                        untitledScript.Contents,
+                        scriptUri,
+                        out Token[] _,
+                        out ParseError[] _);
 
-                    // Set breakpoints on the temp file path so they match functionContext._file
-                    var dbgForBp = _runspaceContext.CurrentRunspace.Runspace.Debugger;
-                    var existingBreakpoints = BreakpointApiUtils.GetBreakpoints(dbgForBp, _debugStateService.RunspaceId);
-                    foreach (var bp in existingBreakpoints)
-                    {
-                        if (bp is System.Management.Automation.LineBreakpoint lbp &&
-                            lbp.Script == BreakpointHandlers.NormalizeScriptUri(untitledScript.DocumentUri.ToString()))
-                        {
-                            BreakpointApiUtils.RemoveBreakpoint(dbgForBp, lbp, _debugStateService.RunspaceId);
-                            var newBp = BreakpointApiUtils.SetBreakpoint(dbgForBp,
-                                BreakpointDetails.Create(tempScriptPath, lbp.Line, lbp.Column, null, null, null),
-                                _debugStateService.RunspaceId);
-                            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] LaunchScriptAsync: re-registered breakpoint at '{tempScriptPath}:{lbp.Line}', verified={newBp is not null}\n");
-                        }
-                    }
-
-                    // Execute the temp file by dot-sourcing its path
-                    command = PSCommandHelpers.BuildDotSourceCommandWithArguments(
-                        PSCommandHelpers.EscapeScriptFilePath(tempScriptPath), _debugStateService?.Arguments);
+                    command = PSCommandHelpers
+                        .BuildDotSourceCommandWithArguments("$args[0]", _debugStateService?.Arguments)
+                        .AddArgument(ast.GetScriptBlock());
                 }
                 else
                 {
