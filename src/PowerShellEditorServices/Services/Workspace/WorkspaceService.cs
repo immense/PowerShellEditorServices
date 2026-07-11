@@ -447,7 +447,7 @@ namespace Microsoft.PowerShell.EditorServices.Services
                         .AddParameter("EQ")
                         .AddParameter("Value", false);
 
-                IReadOnlyList<PSObject> results = psesInternalHost.InvokePSCommand<PSObject>(psCommand, null, CancellationToken.None);
+                IReadOnlyList<PSObject> results = ExecutePSCommandOnPipelineThread<PSObject>(psCommand, null, CancellationToken.None);
                 foreach (string path in results.Select(ConvertWorkspaceItemPath).Where(path => !string.IsNullOrEmpty(path)))
                 {
                     yield return path;
@@ -510,7 +510,7 @@ namespace Microsoft.PowerShell.EditorServices.Services
             string psPath = GetPowerShellPath(uri);
             try
             {
-                IReadOnlyList<string> result = psesInternalHost.InvokePSCommand<string>(
+                IReadOnlyList<string> result = ExecutePSCommandOnPipelineThread<string>(
                     new PSCommand()
                         .AddCommand(@"Microsoft.PowerShell.Management\Get-Content")
                             .AddParameter("LiteralPath", psPath)
@@ -521,12 +521,30 @@ namespace Microsoft.PowerShell.EditorServices.Services
                 return string.Join(Environment.NewLine, result);
             }
             catch (ActionPreferenceStopException ex)
-                when (ex.ErrorRecord.CategoryInfo.Category == ErrorCategory.ObjectNotFound
-                    && ex.ErrorRecord.TargetObject is string[] missingFiles
-                    && missingFiles.Length == 1)
+                when (ex.ErrorRecord.CategoryInfo.Category == ErrorCategory.ObjectNotFound)
             {
-                throw new FileNotFoundException(ex.ErrorRecord.ToString(), missingFiles[0], ex.ErrorRecord.Exception);
+                // The FileSystem provider reports missing paths as string[]; other providers use a plain string.
+                string missingFile = ex.ErrorRecord.TargetObject switch
+                {
+                    string[] { Length: 1 } missingFiles => missingFiles[0],
+                    string missingPath => missingPath,
+                    _ => psPath,
+                };
+
+                throw new FileNotFoundException(ex.ErrorRecord.ToString(), missingFile, ex.ErrorRecord.Exception);
             }
+        }
+
+        // InvokePSCommand is only safe on the pipeline thread; queue onto it unless already there.
+        private IReadOnlyList<TResult> ExecutePSCommandOnPipelineThread<TResult>(
+            PSCommand psCommand,
+            PowerShellExecutionOptions executionOptions,
+            CancellationToken cancellationToken)
+        {
+            return psesInternalHost.IsPipelineThread
+                ? psesInternalHost.InvokePSCommand<TResult>(psCommand, executionOptions, cancellationToken)
+                : psesInternalHost.ExecutePSCommandAsync<TResult>(psCommand, cancellationToken, executionOptions)
+                    .GetAwaiter().GetResult();
         }
 
         // Return only file-backed workspace roots as filesystem paths.

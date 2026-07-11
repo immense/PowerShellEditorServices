@@ -226,6 +226,8 @@ namespace Microsoft.PowerShell.EditorServices.Services.PowerShell.Host
 
         public bool IsRunning => _isRunningLatch.IsSignaled;
 
+        internal bool IsPipelineThread => Environment.CurrentManagedThreadId == _pipelineThread.ManagedThreadId;
+
         public Task Shutdown => _stopped.Task;
 
         IRunspaceInfo IRunspaceContext.CurrentRunspace => CurrentRunspace;
