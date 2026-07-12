@@ -49,6 +49,7 @@ namespace Microsoft.PowerShell.EditorServices.Services
         private VariableContainerDetails globalScopeVariables;
         private VariableContainerDetails scriptScopeVariables;
         private VariableContainerDetails localScopeVariables;
+        private List<VariableContainerDetails> immyScopeVariables = new();
         private StackFrameDetails[] stackFrameDetails;
         private readonly PropertyInfo invocationTypeScriptPositionProperty;
 
@@ -596,7 +597,7 @@ namespace Microsoft.PowerShell.EditorServices.Services
             int autoVariablesId = stackFrames[stackFrameId].AutoVariables.Id;
             int commandVariablesId = stackFrames[stackFrameId].CommandVariables.Id;
 
-            return new VariableScope[]
+            var scopes = new List<VariableScope>
             {
                 new VariableScope(autoVariablesId, VariableContainerDetails.AutoVariablesName),
                 new VariableScope(commandVariablesId, VariableContainerDetails.CommandVariablesName),
@@ -604,6 +605,14 @@ namespace Microsoft.PowerShell.EditorServices.Services
                 new VariableScope(scriptScopeVariables.Id, VariableContainerDetails.ScriptScopeName),
                 new VariableScope(globalScopeVariables.Id, VariableContainerDetails.GlobalScopeName),
             };
+
+            // Add Immy-specific variable scopes (e.g. "Script", "RunContext", "Action", "Session")
+            foreach (var immyScope in immyScopeVariables)
+            {
+                scopes.Add(new VariableScope(immyScope.Id, immyScope.Name));
+            }
+
+            return scopes.ToArray();
         }
 
         #endregion
@@ -629,6 +638,9 @@ namespace Microsoft.PowerShell.EditorServices.Services
                 localScopeVariables = await FetchVariableContainerAsync(VariableContainerDetails.LocalScopeName).ConfigureAwait(false);
 
                 await FetchStackFramesAsync(scriptNameOverride).ConfigureAwait(false);
+
+                // Build Immy-specific variable scopes from VariableLayerAttribute on each PSVariable.
+                FetchImmyVariableScopesAsync();
             }
             finally
             {
@@ -687,6 +699,78 @@ namespace Microsoft.PowerShell.EditorServices.Services
             }
 
             return scopeVariableContainer;
+        }
+
+        /// <summary>
+        /// Reads VariableLayerAttribute from each variable's Attributes collection (set by
+        /// ImmyBot's MetascriptRunspaceExtensions) and organizes variables into Immy-specific
+        /// scope containers like "Script", "RunContext", "Action", "Session", etc.
+        /// These are not real PowerShell scopes but logical groupings that show
+        /// which ImmyBot layer injected each variable.
+        /// </summary>
+        private void FetchImmyVariableScopesAsync()
+        {
+            immyScopeVariables.Clear();
+
+            // Scan all fetched scope variables for VariableLayerAttribute.
+            // We check by type name since PSES can't reference ImmyBot's attribute class.
+            const string layerAttrTypeName = "VariableLayerAttribute";
+
+            var layerGroups = new Dictionary<string, List<VariableDetailsBase>>(StringComparer.OrdinalIgnoreCase);
+
+            void ScanScope(VariableContainerDetails scope)
+            {
+                foreach (var child in scope.Children.Values)
+                {
+                    // VariableDetails wraps a PSVariable; check its Attributes.
+                    if (child is VariableDetails varDetails && varDetails.PSVariable is PSVariable psVar)
+                    {
+                        foreach (var attr in psVar.Attributes)
+                        {
+                            if (attr.GetType().Name.Equals(layerAttrTypeName, StringComparison.Ordinal))
+                            {
+                                string layer = attr.GetType().GetProperty("Layer")?.GetValue(attr)?.ToString() ?? "Unknown";
+                                if (!layerGroups.TryGetValue(layer, out var list))
+                                {
+                                    list = new List<VariableDetailsBase>();
+                                    layerGroups[layer] = list;
+                                }
+                                list.Add(child);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            ScanScope(globalScopeVariables);
+            ScanScope(scriptScopeVariables);
+            ScanScope(localScopeVariables);
+
+            foreach (var layerGroup in layerGroups)
+            {
+                string layerName = layerGroup.Key;
+
+                VariableContainerDetails layerContainer = new(nextVariableId++, layerName);
+                variables.Add(layerContainer);
+
+                foreach (var varDetails in layerGroup.Value)
+                {
+                    if (!layerContainer.Children.ContainsKey(varDetails.Name))
+                    {
+                        layerContainer.Children.Add(varDetails.Name, varDetails);
+                    }
+                }
+
+                if (layerContainer.Children.Count > 0)
+                {
+                    immyScopeVariables.Add(layerContainer);
+                }
+                else
+                {
+                    variables.Remove(layerContainer);
+                }
+            }
         }
 
         // This is a helper type for FetchStackFramesAsync to preserve the variable Type after deserialization.
@@ -756,10 +840,11 @@ namespace Microsoft.PowerShell.EditorServices.Services
                 return false;
             }
 
-            // Filter Global-Scoped variables. We first cast to VariableDetails to ensure the prefix
-            // is added for purposes of comparison.
-            VariableDetails variableToAddDetails = new(variableToAdd);
-            if (globalScopeVariables.Children.ContainsKey(variableToAddDetails.Name))
+            // Filter well-known PowerShell built-in/preference variables to reduce noise.
+            // We used to filter everything in the global scope, but that also filtered
+            // user-defined variables that ended up in the global scope (e.g. from
+            // dot-sourced scripts). Instead, we now only filter known noise variables.
+            if (s_builtInVariableNames.Contains(variableToAdd.Name))
             {
                 return false;
             }
@@ -769,16 +854,36 @@ namespace Microsoft.PowerShell.EditorServices.Services
             {
                 return variableToAdd.Name switch
                 {
-                    "PSItem" or "_" or "" => true,
+                    // Skip empty/nothing variables
+                    null or "" or "_" => false,
+                    // Only show args/input if they have content
                     "args" or "input" => variableToAdd.Value is Array array && array.Length > 0,
                     "PSBoundParameters" => variableToAdd.Value is IDictionary dict && dict.Count > 0,
-                    _ => false
+                    // Show all other local variables (e.g. $a, $result, $computer)
+                    _ => true
                 };
             }
 
             // Any other PSVariables that survive the above criteria should be included.
             return variableInfo.Types[0].EndsWith("PSVariable");
         }
+
+        private static readonly HashSet<string> s_builtInVariableNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "ConfirmPreference", "DebugPreference", "Error", "ErrorActionPreference", "ErrorView",
+            "ExecutionContext", "FormatEnumerationLimit", "HOME", "Host", "InformationPreference",
+            "input", "MaximumHistoryCount", "MyInvocation", "NestedPromptLevel", "OutputEncoding",
+            "PID", "PROFILE", "ProgressPreference", "PSBoundParameters", "PSCommandPath",
+            "PSCulture", "PSDebugContext", "PSDefaultParameterValues", "PSEmailServer",
+            "PSHome", "PSItem", "PSLogUserProfile", "PSModuleAutoLoadingPreference",
+            "PSModulePath", "PSNativeCommandArgumentPassing", "PSNativeCommandUseErrorActionPreference",
+            "PSScriptRoot", "PSSessionConfigurationName", "PSSessionOption", "PSStyle",
+            "PSUICulture", "PSVersionTable", "PWD", "ShellId", "StackTrace",
+            "VerbosePreference", "WarningPreference", "WhatIfPreference", "^", "$",
+            "?", "true", "false", "null", "args", "PSCommand", "PSPath",
+            "ForEach", "Where", "psEditor", "ImmyBotVersion", "ImmyScriptPath",
+            "CanAccessParentTenant", "__psEditorServices_CallStack",
+        };
 
         private async Task FetchStackFramesAsync(string scriptNameOverride)
         {

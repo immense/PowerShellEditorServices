@@ -226,6 +226,8 @@ namespace Microsoft.PowerShell.EditorServices.Services.PowerShell.Host
 
         public bool IsRunning => _isRunningLatch.IsSignaled;
 
+        internal bool IsPipelineThread => Environment.CurrentManagedThreadId == _pipelineThread.ManagedThreadId;
+
         public Task Shutdown => _stopped.Task;
 
         IRunspaceInfo IRunspaceContext.CurrentRunspace => CurrentRunspace;
@@ -890,13 +892,13 @@ if (Get-Module -Name PSReadLine) {
 
             try
             {
-                if (_psFrameStack.Count == 1)
-                {
-                    RunTopLevelExecutionLoop();
-                }
-                else if (frame.IsDebug)
+                if (frame.IsDebug)
                 {
                     RunDebugExecutionLoop();
+                }
+                else if (_psFrameStack.Count == 1)
+                {
+                    RunTopLevelExecutionLoop();
                 }
                 else
                 {
@@ -1572,6 +1574,7 @@ if (Get-Module -Name PSReadLine) {
                     throw pse;
                 }
             }
+
 
             // The debugger has officially started. We use this to later check if we should stop it.
             DebugContext.IsActive = true;

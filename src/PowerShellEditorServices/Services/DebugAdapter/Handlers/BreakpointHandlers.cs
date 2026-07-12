@@ -82,10 +82,14 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                 };
             }
 
-            // At this point, the source file has been verified as a PowerShell script.
+            // Use FilePath so the breakpoint Script matches the script's internal path
+            // (functionContext._file). For files on disk, FilePath is the filesystem path
+            // (matching what dot-source sets). For pspath:// URIs, FilePath is the URI
+            // (matching what Parser.ParseInput sets as the Extent.File).
+            string breakpointScriptPath = scriptFile.FilePath;
             IReadOnlyList<BreakpointDetails> breakpointDetails = request.Breakpoints
                 .Select((srcBreakpoint) => BreakpointDetails.Create(
-                    scriptFile.FilePath,
+                    breakpointScriptPath,
                     srcBreakpoint.Line,
                     srcBreakpoint.Column,
                     srcBreakpoint.Condition,
@@ -100,10 +104,28 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
 
                 try
                 {
+                    // The debugger's DebugMode may be Default or RemoteScript, neither of
+                    // which support SetLineBreakpoint. Use reflection to set it to Local so
+                    // breakpoints can be registered before the script launches.
+                    var debugger = _runspaceContext.CurrentRunspace.Runspace.Debugger;
+                    var debugModeProp = typeof(System.Management.Automation.Debugger).GetProperty("DebugMode");
+                    var currentMode = (System.Management.Automation.DebugModes)debugModeProp!.GetValue(debugger)!;
+                    if ((currentMode & System.Management.Automation.DebugModes.LocalScript) == 0)
+                    {
+                        debugModeProp.SetValue(debugger, currentMode | System.Management.Automation.DebugModes.LocalScript);
+                    }
+
                     updatedBreakpointDetails =
                         await _debugService.SetLineBreakpointsAsync(
                             scriptFile,
                             breakpointDetails).ConfigureAwait(false);
+
+                    // Re-call SetDebugMode after breakpoints are registered. The debugger's
+                    // SetDebugMode internally checks if _idToBreakpoint is non-empty and sets
+                    // _context._debuggingMode to Enabled. If SetDebugMode was called before
+                    // breakpoints were added, _debuggingMode stays 0 and breakpoints are never
+                    // checked during execution.
+                    debugger.SetDebugMode(System.Management.Automation.DebugModes.LocalScript | System.Management.Automation.DebugModes.RemoteScript);
                 }
                 catch (Exception e)
                 {

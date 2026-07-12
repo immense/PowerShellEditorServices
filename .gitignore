@@ -77,3 +77,4 @@ module/PowerShellEditorServices/Third\ Party\ Notices.txt
 
 # JetBrains generated file (Rider, intelliJ)
 .idea/
+nupkgs/

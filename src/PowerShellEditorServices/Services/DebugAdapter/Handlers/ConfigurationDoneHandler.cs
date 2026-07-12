@@ -119,24 +119,15 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                 bool isScriptFile = _workspaceService.TryGetFile(scriptToLaunch, out ScriptFile untitledScript);
                 if (isScriptFile && BreakpointApiUtils.SupportsBreakpointApis(_runspaceContext.CurrentRunspace))
                 {
-                    // Parse untitled files with their `Untitled:` URI as the filename which will
-                    // cache the URI and contents within the PowerShell parser. By doing this, we
-                    // light up the ability to debug untitled files with line breakpoints. This is
-                    // only possible with PowerShell 7's new breakpoint APIs since the old API,
-                    // Set-PSBreakpoint, validates that the given path points to a real file.
+                    // Use the DocumentUri directly — the frontend now uses pspath:// URIs everywhere.
+                    string scriptUri = untitledScript.DocumentUri.ToString();
+
                     ScriptBlockAst ast = Parser.ParseInput(
                         untitledScript.Contents,
-                        untitledScript.DocumentUri.ToString(),
+                        scriptUri,
                         out Token[] _,
                         out ParseError[] _);
 
-                    // In order to use utilize the parser's cache (and therefore hit line
-                    // breakpoints) we need to use the AST's `ScriptBlock` object. Due to
-                    // limitations in PowerShell's public API, this means we must use the
-                    // `PSCommand.AddArgument(object)` method, hence this hack where we dot-source
-                    // `$args[0]. Fortunately the dot-source operator maintains a stack of arguments
-                    // on each invocation, so passing the user's arguments directly in the initial
-                    // `AddScript` surprisingly works.
                     command = PSCommandHelpers
                         .BuildDotSourceCommandWithArguments("$args[0]", _debugStateService?.Arguments)
                         .AddArgument(ast.GetScriptBlock());
@@ -155,10 +146,72 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                 }
             }
 
-            await _executionService.ExecutePSCommandAsync(
-                command,
-                CancellationToken.None,
-                s_debuggerExecutionOptions).ConfigureAwait(false);
+            // Fix: Set _debuggingMode on the TLS (Thread Local Storage) execution context.
+            // The debugger checks _debuggingMode from the TLS context during script execution,
+            // not from the runspace's debugger context. If TLS _debuggingMode is 0, the debugger
+            // skips breakpoint checks entirely, even though breakpoints are registered.
+            try
+            {
+                var localPipelineType = typeof(System.Management.Automation.Runspaces.Runspace).Assembly
+                    .GetType("System.Management.Automation.Runspaces.LocalPipeline");
+                var getCtxMethod = localPipelineType?.GetMethod(
+                    "GetExecutionContextFromTLS",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                var tlsContext = getCtxMethod?.Invoke(null, null);
+                if (tlsContext is not null)
+                {
+                    var execContextType = tlsContext.GetType();
+                    var debuggingModeField = execContextType.GetField(
+                        "_debuggingMode",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (debuggingModeField is not null)
+                    {
+                        // DebugModes.LocalScript = 1
+                        debuggingModeField.SetValue(tlsContext, (System.Management.Automation.DebugModes)1);
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                _logger.LogError(ex, "Failed to set TLS _debuggingMode");
+            }
+
+            // Fix: Ensure _context.CurrentRunspace is set on the debugger's ExecutionContext.
+            // In PSES with UseCurrentThread, the debugger's _context.CurrentRunspace can be null
+            // which causes OnDebuggerStop to crash with NullReferenceException.
+            try
+            {
+                var dbg = _runspaceContext.CurrentRunspace.Runspace.Debugger;
+                var dbgType = dbg.GetType();
+                var contextField = dbgType.GetField(
+                    "_context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (contextField is not null)
+                {
+                    var context = contextField.GetValue(dbg);
+                    var currentRunspaceProp = context?.GetType().GetProperty(
+                        "CurrentRunspace", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (currentRunspaceProp is not null && currentRunspaceProp.GetValue(context) is null)
+                    {
+                        currentRunspaceProp.SetValue(context, _runspaceContext.CurrentRunspace.Runspace);
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                _logger.LogError(ex, "Failed to fix null CurrentRunspace on debugger._context");
+            }
+
+            try
+            {
+                await _executionService.ExecutePSCommandAsync(
+                    command,
+                    CancellationToken.None,
+                    s_debuggerExecutionOptions).ConfigureAwait(false);
+            }
+            catch (System.Exception ex)
+            {
+                _logger.LogError(ex, "LaunchScriptAsync: ExecutePSCommandAsync threw");
+            }
 
             _debugAdapterServer?.SendNotification(EventNames.Terminated);
         }

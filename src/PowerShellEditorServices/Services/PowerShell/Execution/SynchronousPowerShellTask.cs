@@ -57,6 +57,7 @@ namespace Microsoft.PowerShell.EditorServices.Services.PowerShell.Execution
 
         public override IReadOnlyList<TResult> Run(CancellationToken cancellationToken)
         {
+            var cmdText = _psCommand.GetInvocationText();
             _psesHost.Runspace.ThrowCancelledIfUnusable();
             PowerShellContextFrame frame = _psesHost.PushPowerShellForExecution();
             try
@@ -133,7 +134,7 @@ namespace Microsoft.PowerShell.EditorServices.Services.PowerShell.Execution
                     invocationSettings.ErrorActionPreference = ActionPreference.Stop;
                 }
 
-                result = _pwsh.InvokeCommand<TResult>(_psCommand, invocationSettings);
+            result = _pwsh.InvokeCommand<TResult>(_psCommand, invocationSettings);
                 cancellationToken.ThrowIfCancellationRequested();
             }
             // Allow terminate exceptions to propagate for flow control.

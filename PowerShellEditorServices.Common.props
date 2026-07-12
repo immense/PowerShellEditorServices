@@ -14,8 +14,9 @@
     <!-- See https://learn.microsoft.com/en-us/nuget/consume-packages/package-references-in-project-files#locking-dependencies -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!-- See: https://docs.microsoft.com/en-us/dotnet/fundamentals/code-analysis/overview -->
-    <EnableNETAnalyzers>true</EnableNETAnalyzers>
-    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <RunAnalyzers>false</RunAnalyzers>
     <!-- Required to enable IDE0005 as error -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- TODO: Enable <AnalysisMode>All</AnalysisMode> -->

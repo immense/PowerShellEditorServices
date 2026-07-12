@@ -6,10 +6,16 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Management.Automation;
 using System.Security;
 using System.Text;
+using System.Threading;
+using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Logging;
+using Microsoft.PowerShell.EditorServices.Services.PowerShell.Execution;
+using Microsoft.PowerShell.EditorServices.Services.PowerShell.Host;
 using Microsoft.PowerShell.EditorServices.Services.TextDocument;
+using Microsoft.PowerShell.EditorServices.Services.Workspace;
 using Microsoft.PowerShell.EditorServices.Utility;
 using OmniSharp.Extensions.LanguageServer.Protocol;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
@@ -24,15 +30,42 @@ namespace Microsoft.PowerShell.EditorServices.Services
     {
         #region Private Fields
 
+        // List of all file extensions considered PowerShell files in the .Net Core Framework.
+        private static readonly string[] s_psFileExtensionsCoreFramework =
+        {
+            ".ps1",
+            ".psm1",
+            ".psd1"
+        };
+
+        // .Net Core doesn't appear to use the same three letter pattern matching rule although the docs
+        // suggest it should be find the '.ps1xml' files because we search for the pattern '*.ps1'.
+        // ref https://docs.microsoft.com/en-us/dotnet/api/system.io.directory.getfiles?view=netcore-2.1#System_IO_Directory_GetFiles_System_String_System_String_System_IO_EnumerationOptions_
+        private static readonly string[] s_psFileExtensionsFullFramework =
+        {
+            ".ps1",
+            ".psm1",
+            ".psd1",
+            ".ps1xml"
+        };
+
         // An array of globs which includes everything.
         private static readonly string[] s_psIncludeAllGlob = new[]
         {
             "**/*"
         };
 
+        private const string s_psPathScheme = "pspath";
+
+        // The host component of pspath:// URIs for items from the ScriptPSProvider drive.
+        // PowerShell's PSPath uses the drive name (pspath:) but we need the provider name
+        // as the URI host to round-trip correctly through GetPowerShellPath.
+        private const string s_psPathProviderHost = "ScriptPSProvider";
+
         private readonly ILogger logger;
         private readonly Version powerShellVersion;
         private readonly ConcurrentDictionary<string, ScriptFile> workspaceFiles = new();
+        private readonly PsesInternalHost psesInternalHost;
 
         #endregion
 
@@ -79,11 +112,18 @@ namespace Microsoft.PowerShell.EditorServices.Services
             FollowSymlinks = true;
         }
 
+        /// <summary>
+        /// Creates a new instance of the Workspace class backed by a PowerShell host.
+        /// </summary>
+        public WorkspaceService(ILoggerFactory factory, PsesInternalHost psesInternalHost)
+            : this(factory) => this.psesInternalHost = psesInternalHost;
+
         #endregion
 
         #region Public Methods
 
-        public IEnumerable<string> WorkspacePaths => WorkspaceFolders.Select(i => i.Uri.GetFileSystemPath());
+        public IEnumerable<string> WorkspacePaths => WorkspaceFolders.Select(
+            folder => folder.Uri.ToUri().IsFile ? folder.Uri.GetFileSystemPath() : GetPowerShellPath(folder.Uri));
 
         /// <summary>
         /// Gets an open file in the workspace. If the file isn't open but exists on the filesystem, load and return it.
@@ -118,18 +158,8 @@ namespace Microsoft.PowerShell.EditorServices.Services
             // Make sure the file isn't already loaded into the workspace
             if (!workspaceFiles.TryGetValue(keyName, out ScriptFile scriptFile))
             {
-                // This method allows FileNotFoundException to bubble up
-                // if the file isn't found.
-                using (StreamReader streamReader = OpenStreamReader(documentUri))
-                {
-                    scriptFile =
-                        new ScriptFile(
-                            documentUri,
-                            streamReader,
-                            powerShellVersion);
-
-                    workspaceFiles[keyName] = scriptFile;
-                }
+                scriptFile = ScriptFile.Create(documentUri, ReadFileContents(documentUri), powerShellVersion);
+                workspaceFiles[keyName] = scriptFile;
 
                 logger.LogDebug("Opened file on disk: " + documentUri.ToString());
             }
@@ -171,18 +201,10 @@ namespace Microsoft.PowerShell.EditorServices.Services
         /// <param name="scriptFile">The out parameter that will contain the ScriptFile object.</param>
         public bool TryGetFile(DocumentUri documentUri, out ScriptFile scriptFile)
         {
-            switch (documentUri.Scheme)
+            if (!ScriptFile.IsSupportedScheme(documentUri.Scheme))
             {
-                // List supported schemes here
-                case "file":
-                case "inmemory":
-                case "untitled":
-                case "vscode-notebook-cell":
-                    break;
-
-                default:
-                    scriptFile = null;
-                    return false;
+                scriptFile = null;
+                return false;
             }
 
             try
@@ -281,7 +303,14 @@ namespace Microsoft.PowerShell.EditorServices.Services
             Validate.IsNotNull(nameof(scriptFile), scriptFile);
 
             string keyName = GetFileKey(scriptFile.DocumentUri);
-            workspaceFiles.TryRemove(keyName, out ScriptFile _);
+            if (workspaceFiles.TryRemove(keyName, out ScriptFile _))
+            {
+                logger.LogDebug("Closed file: " + scriptFile.DocumentUri);
+            }
+            else
+            {
+                logger.LogWarning("Tried to close file that was not open: " + scriptFile.DocumentUri);
+            }
         }
 
         /// <summary>
@@ -315,6 +344,35 @@ namespace Microsoft.PowerShell.EditorServices.Services
         }
 
         /// <summary>
+        /// Finds a file in the first workspace folder where it exists, if possible.
+        /// Used as a backwards-compatible way to find files in the workspace.
+        /// </summary>
+        /// <param name="filePath"></param>
+        /// <returns>Best possible path.</returns>
+        public string FindFileInWorkspace(string filePath)
+        {
+            // If the file path is already an absolute path, just return it.
+            if (Path.IsPathRooted(filePath))
+            {
+                return filePath;
+            }
+
+            // If the file path is relative, try to find it in the workspace folders.
+            foreach (WorkspaceFolder workspaceFolder in WorkspaceFolders)
+            {
+                string folderPath = workspaceFolder.Uri.GetFileSystemPath();
+                string combinedPath = Path.Combine(folderPath, filePath);
+                if (File.Exists(combinedPath))
+                {
+                    return combinedPath;
+                }
+            }
+
+            // If the file path is not found in the workspace folders, return the original path.
+            return filePath;
+        }
+
+        /// <summary>
         /// Enumerate all the PowerShell (ps1, psm1, psd1) files in the workspace in a recursive manner, using default values.
         /// </summary>
         /// <returns>An enumerator over the PowerShell files found in the workspace.</returns>
@@ -337,7 +395,95 @@ namespace Microsoft.PowerShell.EditorServices.Services
             string[] excludeGlobs,
             string[] includeGlobs,
             int maxDepth,
-            bool ignoreReparsePoints) => [];
+            bool ignoreReparsePoints)
+        {
+            string[] powerShellWorkspacePaths = GetPowerShellWorkspacePaths()
+                .Where(path => !string.IsNullOrEmpty(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            string[] fileSystemWorkspacePaths = GetFileSystemWorkspacePaths()
+                .Where(path => !string.IsNullOrEmpty(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (powerShellWorkspacePaths.Length == 0 && fileSystemWorkspacePaths.Length == 0)
+            {
+                yield break;
+            }
+
+            if (psesInternalHost is not null && powerShellWorkspacePaths.Length > 0)
+            {
+                // Determine if all workspace paths are FileSystem provider paths.
+                // Non-FileSystem providers (e.g. pspath:) don't support Include/Exclude/Depth/FollowSymlink
+                // dynamic parameters, so we only add them for FileSystem paths.
+                bool allFileSystem = powerShellWorkspacePaths.All(
+                    p => p.StartsWith("Microsoft.PowerShell.FileSystem", StringComparison.OrdinalIgnoreCase)
+                         || !p.Contains("::"));
+
+                PSCommand psCommand = new PSCommand()
+                    .AddCommand(@"Microsoft.PowerShell.Management\Get-ChildItem")
+                        .AddParameter("LiteralPath", powerShellWorkspacePaths)
+                        .AddParameter("Recurse")
+                        .AddParameter("ErrorAction", ActionPreference.SilentlyContinue)
+                        .AddParameter("Force");
+
+                if (allFileSystem)
+                {
+                    psCommand
+                        .AddParameter("Include", includeGlobs.Concat(VersionUtils.IsNetCore ? s_psFileExtensionsCoreFramework : s_psFileExtensionsFullFramework).ToArray())
+                        .AddParameter("Exclude", excludeGlobs)
+                        .AddParameter("Depth", maxDepth);
+
+                    if (VersionUtils.IsNetCore)
+                    {
+                        psCommand.AddParameter("FollowSymlink", !ignoreReparsePoints);
+                    }
+                }
+
+                psCommand
+                    .AddCommand("Where-Object")
+                        .AddParameter("Property", "PSIsContainer")
+                        .AddParameter("EQ")
+                        .AddParameter("Value", false);
+
+                IReadOnlyList<PSObject> results = ExecutePSCommandOnPipelineThread<PSObject>(psCommand, null, CancellationToken.None);
+                foreach (string path in results.Select(ConvertWorkspaceItemPath).Where(path => !string.IsNullOrEmpty(path)))
+                {
+                    yield return path;
+                }
+
+                yield break;
+            }
+
+            Matcher matcher = new();
+            foreach (string pattern in includeGlobs) { matcher.AddInclude(pattern); }
+            foreach (string pattern in excludeGlobs) { matcher.AddExclude(pattern); }
+
+            foreach (string rootPath in fileSystemWorkspacePaths)
+            {
+                if (!Directory.Exists(rootPath))
+                {
+                    continue;
+                }
+
+                WorkspaceFileSystemWrapperFactory fsFactory = new(
+                    rootPath,
+                    maxDepth,
+                    VersionUtils.IsNetCore ? s_psFileExtensionsCoreFramework : s_psFileExtensionsFullFramework,
+                    ignoreReparsePoints,
+                    logger);
+
+                PatternMatchingResult fileMatchResult = matcher.Execute(fsFactory.RootDirectory);
+                foreach (FilePatternMatch item in fileMatchResult.Files)
+                {
+                    // item.Path always contains forward slashes in paths when it should be backslashes on Windows.
+                    // Since we're returning strings here, it's important to use the correct directory separator.
+                    string path = VersionUtils.IsWindows ? item.Path.Replace('/', Path.DirectorySeparatorChar) : item.Path;
+                    yield return Path.Combine(rootPath, path);
+                }
+            }
+        }
 
         #endregion
 
@@ -353,10 +499,179 @@ namespace Microsoft.PowerShell.EditorServices.Services
             return new StreamReader(fileStream, new UTF8Encoding(), detectEncodingFromByteOrderMarks: true);
         }
 
-        internal static string ReadFileContents(DocumentUri uri)
+        internal string ReadFileContents(DocumentUri uri)
         {
-            using StreamReader reader = OpenStreamReader(uri);
-            return reader.ReadToEnd();
+            if (uri.ToUri().IsFile || psesInternalHost is null)
+            {
+                using StreamReader reader = OpenStreamReader(uri);
+                return reader.ReadToEnd();
+            }
+
+            string psPath = GetPowerShellPath(uri);
+            try
+            {
+                IReadOnlyList<string> result = ExecutePSCommandOnPipelineThread<string>(
+                    new PSCommand()
+                        .AddCommand(@"Microsoft.PowerShell.Management\Get-Content")
+                            .AddParameter("LiteralPath", psPath)
+                            .AddParameter("ErrorAction", ActionPreference.Stop),
+                    new PowerShellExecutionOptions { ThrowOnError = true },
+                    CancellationToken.None);
+
+                return string.Join(Environment.NewLine, result);
+            }
+            catch (ActionPreferenceStopException ex)
+                when (ex.ErrorRecord.CategoryInfo.Category == ErrorCategory.ObjectNotFound)
+            {
+                // The FileSystem provider reports missing paths as string[]; other providers use a plain string.
+                string missingFile = ex.ErrorRecord.TargetObject switch
+                {
+                    string[] { Length: 1 } missingFiles => missingFiles[0],
+                    string missingPath => missingPath,
+                    _ => psPath,
+                };
+
+                throw new FileNotFoundException(ex.ErrorRecord.ToString(), missingFile, ex.ErrorRecord.Exception);
+            }
+        }
+
+        // InvokePSCommand is only safe on the pipeline thread; queue onto it unless already there.
+        private IReadOnlyList<TResult> ExecutePSCommandOnPipelineThread<TResult>(
+            PSCommand psCommand,
+            PowerShellExecutionOptions executionOptions,
+            CancellationToken cancellationToken)
+        {
+            return psesInternalHost.IsPipelineThread
+                ? psesInternalHost.InvokePSCommand<TResult>(psCommand, executionOptions, cancellationToken)
+                : psesInternalHost.ExecutePSCommandAsync<TResult>(psCommand, cancellationToken, executionOptions)
+                    .GetAwaiter().GetResult();
+        }
+
+        // Return only file-backed workspace roots as filesystem paths.
+        // Example:
+        //   file:///repo -> /repo
+        //   pspath://FileSystem/C%3A/repo -> excluded
+        private IEnumerable<string> GetFileSystemWorkspacePaths()
+        {
+            if (WorkspaceFolders.Count > 0)
+            {
+                return WorkspaceFolders
+                    .Select(folder => folder.Uri)
+                    .Where(uri => uri.ToUri().IsFile)
+                    .Select(uri => uri.GetFileSystemPath());
+            }
+
+            return string.IsNullOrEmpty(InitialWorkingDirectory)
+                ? Array.Empty<string>()
+                : new[] { InitialWorkingDirectory };
+        }
+
+        // Return only provider-backed workspace roots as PowerShell literal paths.
+        // Example:
+        //   pspath://FileSystem/C%3A/repo -> FileSystem::C:/repo
+        //   file:///repo -> excluded
+        private IEnumerable<string> GetPowerShellWorkspacePaths()
+        {
+            if (WorkspaceFolders.Count > 0)
+            {
+                return WorkspaceFolders
+                    .Select(folder => folder.Uri)
+                    .Where(uri => !uri.ToUri().IsFile)
+                    .Select(GetPowerShellPath);
+            }
+
+            return Array.Empty<string>();
+        }
+
+        // Normalize Get-ChildItem output to a workspace path string.
+        // Example:
+        //   FullName=/repo/a.ps1 -> /repo/a.ps1
+        //   PSPath=Registry::HKEY_CURRENT_USER\\Software\\Foo -> pspath://Registry/HKEY_CURRENT_USER/Software/Foo
+        private static string ConvertWorkspaceItemPath(PSObject item)
+        {
+            if (item.Properties["FullName"]?.Value is string fullName && !string.IsNullOrEmpty(fullName))
+            {
+                return fullName;
+            }
+
+            return item.Properties["PSPath"]?.Value is string psPath && !string.IsNullOrEmpty(psPath)
+                ? CreatePowerShellPathUri(psPath)
+                : null;
+        }
+
+        // Convert a document URI to the literal path PowerShell commands should use.
+        // Example:
+        //   file:///repo/a.ps1 -> /repo/a.ps1
+        //   pspath://FileSystem/C%3A/repo/a.ps1 -> FileSystem::C:/repo/a.ps1
+        private static string GetPowerShellPath(DocumentUri uri)
+        {
+            Uri parsedUri = uri.ToUri();
+            if (parsedUri.IsFile)
+            {
+                return parsedUri.LocalPath;
+            }
+
+            if (string.Equals(uri.Scheme, s_psPathScheme, StringComparison.OrdinalIgnoreCase))
+            {
+                string provider = parsedUri.GetComponents(UriComponents.Host, UriFormat.Unescaped);
+                string path = Uri.UnescapeDataString(parsedUri.AbsolutePath);
+                if (path.Length >= 3 && path[0] == '/' && char.IsLetter(path[1]) && path[2] == ':')
+                {
+                    path = path.TrimStart('/');
+                }
+
+                return string.IsNullOrEmpty(provider)
+                    ? path.TrimStart('/')
+                    : $"{provider}::{path}";
+            }
+
+            throw new NotSupportedException($"Unsupported URI scheme '{uri.Scheme}'.");
+        }
+
+        // Convert a PowerShell provider path to the pspath:// document form used by the workspace.
+        // Example:
+        //   FileSystem::C:\\repo\\a.ps1 -> pspath://FileSystem/C%3A/repo/a.ps1
+        //   Registry::HKEY_CURRENT_USER\\Software\\Foo -> pspath://Registry/HKEY_CURRENT_USER/Software/Foo
+        //   pspath:\local\Function\MyScript.ps1 -> pspath://ScriptPSProvider/local/Function/MyScript.ps1
+        //   ScriptPSProvider::pspath:\local\Function\MyScript.ps1 -> pspath://ScriptPSProvider/local/Function/MyScript.ps1
+        private static string CreatePowerShellPathUri(string psPath)
+        {
+            // Strip the provider qualifier prefix if present (e.g. "ScriptPSProvider::pspath:\..." -> "pspath:\...")
+            string pathPart = psPath;
+            if (pathPart.Contains("::"))
+            {
+                string[] qualifiedParts = pathPart.Split(new[] { "::" }, 2, StringSplitOptions.None);
+                if (qualifiedParts.Length == 2)
+                {
+                    pathPart = qualifiedParts[1];
+                }
+            }
+
+            // Handle drive-qualified paths from the pspath: provider drive, e.g.
+            //   pspath:\local\Function\MyScript.ps1
+            // PowerShell sets PSPath to the drive-qualified path (potentially provider-qualified
+            // as "ScriptPSProvider::pspath:\..."), so we strip the provider prefix above and
+            // then reconstruct the provider-qualified URI form.
+            if (pathPart.StartsWith($"{s_psPathScheme}:", StringComparison.OrdinalIgnoreCase))
+            {
+                int colonIndex = pathPart.IndexOf(':');
+                string drivePath = pathPart.Substring(colonIndex + 1).Replace('\\', '/').TrimStart('/');
+                string driveEncodedPath = string.Join("/", drivePath.Split('/').Select(Uri.EscapeDataString));
+                return $"{s_psPathScheme}://{s_psPathProviderHost}/{driveEncodedPath}";
+            }
+
+            // For other provider-qualified paths (e.g. FileSystem::C:\repo\a.ps1),
+            // use the original psPath which still has the "::" separator.
+            string[] parts = psPath.Split(new[] { "::" }, 2, StringSplitOptions.None);
+            if (parts.Length != 2)
+            {
+                return $"{s_psPathScheme}:///{Uri.EscapeDataString(psPath)}";
+            }
+
+            string provider = parts[0].Split('\\').Last();
+            string normalizedPath = parts[1].Replace('\\', '/');
+            string encodedPath = string.Join("/", normalizedPath.Split('/').Select(Uri.EscapeDataString));
+            return $"{s_psPathScheme}://{Uri.EscapeDataString(provider)}/{encodedPath}";
         }
 
         internal string ResolveWorkspacePath(string path) => ResolveRelativeScriptPath(InitialWorkingDirectory, path);

@@ -29,6 +29,11 @@ namespace Microsoft.PowerShell.EditorServices.Services.DebugAdapter
         protected object ValueObject { get; }
         private VariableDetails[] cachedChildren;
 
+        /// <summary>
+        /// The original PSVariable if this was created from one, used for attribute inspection.
+        /// </summary>
+        public PSVariable PSVariable { get; }
+
         #endregion
 
         #region Constructors
@@ -43,6 +48,7 @@ namespace Microsoft.PowerShell.EditorServices.Services.DebugAdapter
         public VariableDetails(PSVariable psVariable)
             : this(DollarPrefix + psVariable.Name, psVariable.Value)
         {
+            PSVariable = psVariable;
         }
 
         /// <summary>
