@@ -49,7 +49,6 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
 
         public async Task<SetBreakpointsResponse> Handle(SetBreakpointsArguments request, CancellationToken cancellationToken)
         {
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers.Handle called, path='{request.Source.Path}'\n");
             if (!_workspaceService.TryGetFile(request.Source.Path, out ScriptFile scriptFile))
             {
                 string message = _debugStateService.NoDebug ? string.Empty : "Source file could not be accessed, breakpoint not set.";
@@ -83,9 +82,11 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                 };
             }
 
-            // Use the DocumentUri directly — the frontend now uses pspath:// URIs everywhere,
-            // so no normalization is needed.
-            string breakpointScriptPath = scriptFile.DocumentUri.ToString();
+            // Use FilePath so the breakpoint Script matches the script's internal path
+            // (functionContext._file). For files on disk, FilePath is the filesystem path
+            // (matching what dot-source sets). For pspath:// URIs, FilePath is the URI
+            // (matching what Parser.ParseInput sets as the Extent.File).
+            string breakpointScriptPath = scriptFile.FilePath;
             IReadOnlyList<BreakpointDetails> breakpointDetails = request.Breakpoints
                 .Select((srcBreakpoint) => BreakpointDetails.Create(
                     breakpointScriptPath,
@@ -95,16 +96,11 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                     srcBreakpoint.HitCondition,
                     srcBreakpoint.LogMessage)).ToList();
 
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: FilePath='{scriptFile.FilePath}', DocumentUri='{scriptFile.DocumentUri}', breakpointScriptPath='{breakpointScriptPath}', #breakpoints={breakpointDetails.Count}, line={breakpointDetails[0].LineNumber}\n");
-
             // If this is a "run without debugging (Ctrl+F5)" session ignore requests to set breakpoints.
             IReadOnlyList<BreakpointDetails> updatedBreakpointDetails = breakpointDetails;
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: NoDebug={_debugStateService.NoDebug}\n");
             if (!_debugStateService.NoDebug)
             {
-                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: calling WaitForSetBreakpointHandleAsync\n");
                 await _debugStateService.WaitForSetBreakpointHandleAsync().ConfigureAwait(false);
-                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: calling SetLineBreakpointsAsync\n");
 
                 try
                 {
@@ -117,14 +113,12 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                     if ((currentMode & System.Management.Automation.DebugModes.LocalScript) == 0)
                     {
                         debugModeProp.SetValue(debugger, currentMode | System.Management.Automation.DebugModes.LocalScript);
-                        System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: added LocalScript to DebugMode (was {currentMode})\n");
                     }
 
                     updatedBreakpointDetails =
                         await _debugService.SetLineBreakpointsAsync(
                             scriptFile,
                             breakpointDetails).ConfigureAwait(false);
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: SetLineBreakpointsAsync returned {updatedBreakpointDetails.Count} breakpoints, verified={updatedBreakpointDetails.FirstOrDefault()?.Verified}\n");
 
                     // Re-call SetDebugMode after breakpoints are registered. The debugger's
                     // SetDebugMode internally checks if _idToBreakpoint is non-empty and sets
@@ -132,11 +126,9 @@ namespace Microsoft.PowerShell.EditorServices.Handlers
                     // breakpoints were added, _debuggingMode stays 0 and breakpoints are never
                     // checked during execution.
                     debugger.SetDebugMode(System.Management.Automation.DebugModes.LocalScript | System.Management.Automation.DebugModes.RemoteScript);
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: re-called SetDebugMode after breakpoint registration\n");
                 }
                 catch (Exception e)
                 {
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] BreakpointHandlers: EXCEPTION: {e}\n");
                     // Log whatever the error is
                     _logger.LogException($"Caught error while setting breakpoints in SetBreakpoints handler for file {scriptFile?.FilePath}", e);
                 }

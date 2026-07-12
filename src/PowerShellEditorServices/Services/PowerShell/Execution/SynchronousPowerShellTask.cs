@@ -58,7 +58,6 @@ namespace Microsoft.PowerShell.EditorServices.Services.PowerShell.Execution
         public override IReadOnlyList<TResult> Run(CancellationToken cancellationToken)
         {
             var cmdText = _psCommand.GetInvocationText();
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] SynchronousPowerShellTask.Run on thread {System.Environment.CurrentManagedThreadId}, command={cmdText.Substring(0, System.Math.Min(50, cmdText.Length))}\n");
             _psesHost.Runspace.ThrowCancelledIfUnusable();
             PowerShellContextFrame frame = _psesHost.PushPowerShellForExecution();
             try
@@ -135,103 +134,7 @@ namespace Microsoft.PowerShell.EditorServices.Services.PowerShell.Execution
                     invocationSettings.ErrorActionPreference = ActionPreference.Stop;
                 }
 
-                // Check _debuggingMode right before Invoke
-            try {
-                var debugger = _pwsh.Runspace.Debugger;
-                var debuggerType = debugger.GetType();
-                var contextField = debuggerType.GetField("_context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (contextField != null) {
-                    var context = contextField.GetValue(debugger);
-                    var execContextType = context.GetType();
-                    var debuggingModeField = execContextType.GetField("_debuggingMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (debuggingModeField != null) {
-                        var debuggingMode = debuggingModeField.GetValue(context);
-                        System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: _context._debuggingMode={debuggingMode} BEFORE Invoke, InBreakpoint={debugger.InBreakpoint}\n");
-                    }
-                    // Check if Runspace.DefaultRunspace matches our runspace
-                    var defaultRunspace = System.Management.Automation.Runspaces.Runspace.DefaultRunspace;
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: Runspace.DefaultRunspace.Id={defaultRunspace?.Id}, _pwsh.Runspace.Id={_pwsh.Runspace.Id}, same={defaultRunspace == _pwsh.Runspace}\n");
-                    if (defaultRunspace != null && defaultRunspace != _pwsh.Runspace) {
-                        var ecProp = typeof(System.Management.Automation.Runspaces.Runspace).GetProperty("ExecutionContext", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        var tlsExecContext = ecProp?.GetValue(defaultRunspace);
-                        var tlsDebugMode = execContextType.GetField("_debuggingMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(tlsExecContext);
-                        System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: TLS _debuggingMode={tlsDebugMode}\n");
-                    }
-                    // Check if the ExecutionContext from the runspace matches the debugger's context
-                    var ecProp2 = typeof(System.Management.Automation.Runspaces.Runspace).GetProperty("ExecutionContext", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    var runspaceEc = ecProp2?.GetValue(_pwsh.Runspace);
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: runspace.ExecutionContext == debugger._context: {runspaceEc == context}\n");
-                    // Check _idToBreakpoint
-                    var idToBreakpointField = debuggerType.GetField("_idToBreakpoint", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (idToBreakpointField != null) {
-                        var idToBreakpoint = idToBreakpointField.GetValue(debugger) as System.Collections.IDictionary;
-                        System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: _idToBreakpoint count={idToBreakpoint?.Count}\n");
-                        if (idToBreakpoint != null) {
-                            foreach (System.Collections.DictionaryEntry entry in idToBreakpoint) {
-                                var bp = entry.Value;
-                                var bpType = bp.GetType();
-                                var scriptProp = bpType.GetProperty("Script");
-                                var lineProp = bpType.GetProperty("Line");
-                                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES]   breakpoint: id={entry.Key}, script='{scriptProp?.GetValue(bp)}', line={lineProp?.GetValue(bp)}\n");
-                                // Check SequencePointIndex and BreakpointBitArray
-                                var spIndexProp = bpType.GetProperty("SequencePointIndex", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                                if (spIndexProp != null) {
-                                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES]     SequencePointIndex={spIndexProp.GetValue(bp)}\n");
-                                }
-                                var bpBitArrayProp = bpType.GetProperty("BreakpointBitArray", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                                if (bpBitArrayProp != null) {
-                                    var bitArray = bpBitArrayProp.GetValue(bp) as System.Collections.BitArray;
-                                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES]     BreakpointBitArray={(bitArray == null ? "null" : bitArray.Count + " bits")}\n");
-                                }
-                            }
-                        }
-                    }
-                    // Check _pendingBreakpoints
-                    var pendingBpField = debuggerType.GetField("_pendingBreakpoints", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (pendingBpField != null) {
-                        var pendingBp = pendingBpField.GetValue(debugger) as System.Collections.IDictionary;
-                        System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: _pendingBreakpoints count={pendingBp?.Count}\n");
-                        if (pendingBp != null) {
-                            foreach (System.Collections.DictionaryEntry entry in pendingBp) {
-                                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES]   pending key='{entry.Key}'\n");
-                            }
-                        }
-                    }
-                }
-                // Also log the command text
-                var cmdText = _psCommand.GetInvocationText();
-                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: about to invoke '{cmdText.Substring(0, System.Math.Min(100, cmdText.Length))}'\n");
-            } catch (System.Exception ex) {
-                System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: reflection failed: {ex.Message}\n");
-            }
-
-            // Check CurrentRunspace before Invoke
-            try {
-                var dbg = _pwsh.Runspace.Debugger;
-                var dbgType = dbg.GetType();
-                var contextField = dbgType.GetField("_context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (contextField != null) {
-                    var context = contextField.GetValue(dbg);
-                    var crProp = context?.GetType().GetProperty("CurrentRunspace", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    var cr = crProp?.GetValue(context);
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: BEFORE Invoke CurrentRunspace={cr?.GetHashCode()}, isNull={cr == null}, ctxHash={context?.GetHashCode()}, thread={System.Environment.CurrentManagedThreadId}\n");
-                }
-            } catch { }
-
             result = _pwsh.InvokeCommand<TResult>(_psCommand, invocationSettings);
-
-            // Check CurrentRunspace after Invoke
-            try {
-                var dbg = _pwsh.Runspace.Debugger;
-                var dbgType = dbg.GetType();
-                var contextField = dbgType.GetField("_context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (contextField != null) {
-                    var context = contextField.GetValue(dbg);
-                    var crProp = context?.GetType().GetProperty("CurrentRunspace", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    var cr = crProp?.GetValue(context);
-                    System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] ExecuteNormally: AFTER Invoke CurrentRunspace={cr?.GetHashCode()}, isNull={cr == null}, ctxHash={context?.GetHashCode()}, thread={System.Environment.CurrentManagedThreadId}\n");
-                }
-            } catch { }
                 cancellationToken.ThrowIfCancellationRequested();
             }
             // Allow terminate exceptions to propagate for flow control.

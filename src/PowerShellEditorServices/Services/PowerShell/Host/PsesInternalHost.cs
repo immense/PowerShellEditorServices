@@ -1292,11 +1292,9 @@ if (Get-Module -Name PSReadLine) {
 
         private void AddRunspaceEventHandlers(Runspace runspace)
         {
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] AddRunspaceEventHandlers: runspace Id={runspace.Id}, Debugger type={runspace.Debugger.GetType().Name}\n");
             runspace.Debugger.DebuggerStop += OnDebuggerStopped;
             runspace.Debugger.BreakpointUpdated += OnBreakpointUpdated;
             runspace.StateChanged += OnRunspaceStateChanged;
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] AddRunspaceEventHandlers: DebuggerStop subscribed, DebugMode={runspace.Debugger.DebugMode}\n");
         }
 
         private void RemoveRunspaceEventHandlers(Runspace runspace)
@@ -1549,7 +1547,6 @@ if (Get-Module -Name PSReadLine) {
 
         private void OnDebuggerStopped(object sender, DebuggerStopEventArgs debuggerStopEventArgs)
         {
-            try { System.Console.Error.WriteLine("PSES_ON_DEBUGGER_STOPPED_CALLED"); System.IO.File.AppendAllText("/tmp/pses-debug.log", "[PSES] PSES_ON_DEBUGGER_STOPPED_CALLED\n"); } catch (System.Exception ex) { System.Console.Error.WriteLine($"PSES_ON_DEBUGGER_STOPPED_FAILED: {ex.Message}"); }
             // If ErrorActionPreference is set to Break, any engine exception is going to trigger a
             // pipeline stop. Technically this is the same behavior as a standalone PowerShell
             // process, but we use pipeline stops with greater frequency due to features like run
@@ -1574,12 +1571,10 @@ if (Get-Module -Name PSReadLine) {
 
                 if (triggerObject is PipelineStoppedException pse)
                 {
-                    System.IO.File.AppendAllText("/tmp/pses-debug2.log", "[PSES] OnDebuggerStopped: throwing PipelineStoppedException\n");
                     throw pse;
                 }
             }
 
-            System.IO.File.AppendAllText("/tmp/pses-debug.log", $"[PSES] OnDebuggerStopped: past trigger check, isExternal={Environment.CurrentManagedThreadId != _pipelineThread.ManagedThreadId}, thread={Environment.CurrentManagedThreadId}, pipelineThread={_pipelineThread.ManagedThreadId}\n");
 
             // The debugger has officially started. We use this to later check if we should stop it.
             DebugContext.IsActive = true;
